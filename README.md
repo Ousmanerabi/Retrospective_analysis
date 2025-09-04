@@ -53,9 +53,6 @@ The analysis combines **routine HMIS data**, **DHS/MIS surveys**, **PNLP interve
 
 ## Key Insights  
 - **Adjustment 1 ≈ crude incidence** → effective testing policies  
-- **Adjustment 2** revealed underreporting in East, Sahel, Centre-North, Centre-East  
-- **Adjustment 3** added ~450 cases per 1000 in Gorom-Gorom, Gaoua, Kaya, Boussouma, Fada → care-seeking effect  
-- 39/70 districts show **downward trends**, while Gorom-Gorom, Sapone, Kampti show **persistent increases**  
 
 ---
 
