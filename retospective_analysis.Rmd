@@ -1,0 +1,551 @@
+---
+title: "Analyse retrospective"
+author: "Ousmane DIALLO"
+date: "2025-08-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Prérequis** : Connaissance de base en R, manipulation de données spatiales, et analyse de séries temporelles. Ce tutoriel utilise les packages `dplyr`, `lubridate`, `plyr`, `season`, `sf`, `tmap`, `ggplot2`, `readxl`, `scales`, `data.table`, et `stringr`.
+
+Ce tutoriel présente une analyse rétrospective des données de paludisme au Burkina Faso de 2016 à 2022. Il couvre la fusion des données, le calcul des indicateurs d'incidence selon la méthode de l'OMS, l'analyse des tendances avec la décomposition STL et le test Mann-Kendall, et la visualisation des résultats sous forme de graphiques et de cartes. Chaque étape est expliquée pour un usage pédagogique dans un atelier.
+
+**Note** : Assurez-vous que le fichier `BFA_routine_2016_2022.xlsx` et le shapefile `BFA_Districts_Sanitaires_2022.shp` (avec `.dbf`, `.shx`, etc.) sont dans le répertoire spécifié (`C:/Users/ood5226.FSM/...`). Les ensembles `district_report`, `care_seeking_data2`, et `data_population_yearly` doivent être chargés dans l'environnement R.
+
+
+## 1. Chargement des librairies
+
+**Explication** : Les packages nécessaires sont chargés pour manipuler les données, gérer les dates, effectuer des analyses de séries temporelles, lire des fichiers Excel, manipuler des données spatiales, et créer des visualisations.
+
+
+```{r}
+library(dplyr)       # Manipulation des données tabulaires
+library(lubridate)   # Gestion des dates
+library(plyr)        # Manipulation des données (compatibilité)
+library(season)      # Analyse de séries temporelles (Mann-Kendall, Sen's Slope)
+library(sf)          # Gestion des données spatiales
+library(tmap)        # Création de cartes
+library(ggplot2)     # Visualisation graphique
+library(readxl)      # Lecture de fichiers Excel
+library(scales)      # Gestion des échelles pour les graphiques
+library(data.table)  # Combinaison des résultats STL
+library(stringr)     # Manipulation des chaînes pour les titres
+```
+
+## 2. Chargement et fusion des données
+
+**Explication** : Les données mensuelles de paludisme sont chargées depuis un fichier Excel et fusionnées avec les rapports de district, les données de recherche de soins, et les données de population. Une version annuelle agrège les données par district et année, calculant les moyennes des taux de rapport et les sommes des cas.
+
+
+```{r load_data}
+
+# Charger les données mensuelles
+BFA_routine_2016_2022 <- read_excel("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/Data_excel/BFA_routine_2016_2022.xlsx")
+
+# Fusion mensuelle
+BFA_monthly_routine_data_with_all <- BFA_routine_2016_2022 %>%
+  left_join(district_report, by = c("adm2", "year", "month")) %>%
+  left_join(care_seeking_data2, by = c("adm2", "year")) %>%
+  left_join(data_population_yearly, by = c("adm2", "year"))
+
+# Fusion annuelle avec agrégation
+BFA_yearly_routine_data_with_all <- BFA_routine_2016_2022 %>%
+  left_join(district_report, by = c("adm2", "year", "month")) %>%
+  group_by(adm2, year) %>%
+  summarise(
+    rep_rate = mean(rep_rate, na.rm = TRUE),
+    weighted_rep_rate = mean(weighted_rep_rate, na.rm = TRUE),
+    across(allout:pres_ov5, ~ sum(.x, na.rm = TRUE))
+  ) %>%
+  left_join(care_seeking_data2, by = c("adm2", "year")) %>%
+  left_join(data_population_yearly, by = c("adm2", "year"))
+
+# Agrégation annuelle pour year_cases
+data_for_trend_analysis <- BFA_monthly_routine_data_with_all
+year_cases <- data_for_trend_analysis %>%
+  group_by(adm2, year) %>%
+  summarise(
+    weighted_rep_rate = mean(weighted_rep_rate, na.rm = TRUE),
+    rep_rate = mean(rep_rate, na.rm = TRUE),
+    across(susp:maltreat, ~ sum(.x, na.rm = TRUE))
+  )
+```
+
+## 3. Calcul des indicateurs d'incidence (Méthode OMS)
+
+**Explication** : La méthode OMS ajuste les cas de paludisme pour tenir compte des cas présumés, des taux de rapport, et de la couverture des secteurs public et privé. Les indicateurs sont calculés annuellement (pour les plus de 5 ans) et mensuellement (toutes tranches d’âge).
+
+### 3.1 Incidence annuelle
+
+**Explication** : Les données annuelles utilisent les cas confirmés (`conf_ov5`) et présumés (`pres_ov5`) pour calculer le taux de positivité des tests (TPR) et ajuster les cas.
+
+
+```{r}
+data_finale1 <- BFA_yearly_routine_data_with_all
+yearly_DS_incide_ov5 <- data_finale1 %>%
+  mutate(
+    TPR = conf_ov5 / test_ov5,
+    total_cases_report_public_sector = conf_ov5,
+    cases_adjusted_presumed = conf_ov5 + (pres_ov5 * TPR),
+    cases_adjusted_presumed_RR = cases_adjusted_presumed / weighted_rep_rate,
+    F = (cases_adjusted_presumed_RR / publ_cov) * priv_cov,
+    T = (cases_adjusted_presumed_RR / publ_cov) * notrt_cov,
+    cases_adjusted_presumed_RR_TSR = cases_adjusted_presumed_RR + F + T,
+    mal_cases = (total_cases_report_public_sector / pop_ov5) * 1000,
+    incidence_adj_presumed_cases = (cases_adjusted_presumed / pop_ov5) * 1000,
+    incidence_adj_presumed_cases_RR = (cases_adjusted_presumed_RR / pop_ov5) * 1000,
+    incidence_adj_presumed_cases_RR_TSR = (cases_adjusted_presumed_RR_TSR / pop_ov5) * 1000
+  ) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.nan(.), 0, .)))
+```
+
+
+## 4. Visualisation des tendances mensuelles
+
+**Explication** : Quatre graphiques linéaires montrent les tendances mensuelles des indicateurs d’incidence (brute, ajustée 1, ajustée 2, ajustée 3) par district.
+
+```{r}
+p1 <- ggplot(monthly_DS_incide, aes(x = Date, y = mal_cases, group = as.factor(adm2))) +
+  geom_line(alpha = 0.25, size = 1, show.legend = FALSE, color = "blue") +
+  ylab("") + ggtitle("Monthly crude incidence") +
+  scale_x_yearmon("Date", breaks = sort(unique(monthly_DS_incide$Date))[c(seq(1, 96, 6), 96)],
+                  labels = sort(unique(monthly_DS_incide$Date))[c(seq(1, 96, 6), 96)]) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black")
+  )
+
+# Sauvegarder les graphiques
+pdf("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/monthly_incidence_plots.pdf", width = 10, height = 8)
+print(p1)
+dev.off()
+```
+
+
+## 5. Analyse des variations de taux
+
+**Explication** : Les variations relatives des indicateurs d’incidence entre 2016 et 2022 sont calculées, et des catégories sont définies pour comparer les niveaux initiaux et finaux.
+
+```{r rate_variation}
+Augment_dimuni <- yearly_DS_incide_ov5 %>%
+  group_by(adm2) %>%
+  arrange(year) %>%
+  summarise(
+    first_crude = first(mal_cases),
+    last_crude = last(mal_cases),
+    first_N3 = first(incidence_adj_presumed_cases_RR_TSR),
+    last_N3 = last(incidence_adj_presumed_cases_RR_TSR),
+    first_N2 = first(incidence_adj_presumed_cases_RR),
+    last_N2 = last(incidence_adj_presumed_cases_RR),
+    first_N1 = first(incidence_adj_presumed_cases),
+    last_N1 = last(incidence_adj_presumed_cases),
+    rate = (last_crude - first_crude) / first_crude * 100,
+    rateN3 = (last_N3 - first_N3) / first_N3 * 100,
+    rateN2 = (last_N2 - first_N2) / first_N2 * 100,
+    rateN1 = (last_N1 - first_N1) / first_N1 * 100
+  ) %>%
+  ungroup() %>%
+  distinct(adm2, .keep_all = TRUE)
+
+yearly_DS_incidence1 <- Augment_dimuni %>%
+  mutate(
+    categ3 = case_when(
+      first_N3 < 100 ~ "very low",
+      first_N3 >= 100 & first_N3 < 250 ~ "low",
+      first_N3 >= 250 & first_N3 < 450 ~ "Moderate",
+      first_N3 >= 450 ~ "High",
+      TRUE ~ "low"
+    ),
+    categ4 = case_when(
+      last_N3 < 100 ~ "very low",
+      last_N3 >= 100 & last_N3 < 250 ~ "low",
+      last_N3 >= 250 & last_N3 < 450 ~ "Moderate",
+      last_N3 >= 450 ~ "High",
+      TRUE ~ "low"
+    ),
+    categ5 = paste(categ3, categ4, sep = "-"),
+    cat3 = case_when(
+      categ5 %in% c("High-low", "High-Moderate", "Moderate-low") ~ "Decrease",
+      categ5 %in% c("High-High", "Moderate-Moderate", "low-low") ~ "Stable",
+      TRUE ~ "Increase"
+    )
+  )
+
+# Visualisation des variations
+gg4 <- ggplot(yearly_DS_incidence1, aes(x = last_N3, y = rateN3, color = categ5)) +
+  geom_point() +
+  geom_text(aes(label = ifelse(categ5 %in% c("High-low", "Moderate-High", "High-Moderate", "low-Moderate", "Moderate-low"), adm2, ""))) +
+  theme_bw() +
+  xlab("Adjusted incidence 3 (2022)") +
+  ylab("Relative percent change (%)") +
+  ggtitle("Variation of adjusted incidence 3 by district")
+
+pdf("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/rate_variation_plot.pdf", width = 8, height = 6)
+print(gg4)
+dev.off()
+```
+
+
+## 6. Analyse STL et Mann-Kendall
+
+**Explication** : Les séries temporelles sont normalisées, décomposées avec STL, et analysées avec Mann-Kendall et la pente de Sen pour évaluer les tendances par district.
+
+### 6.1 Normalisation
+
+**Explication** : La fonction `getNormalized` standardise les données pour faciliter la comparaison.
+
+```{r normalization}
+getNormalized <- function(vec) {
+  if (!is.numeric(vec) || all(is.na(vec))) {
+    warning("Input vector is non-numeric or all NA; returning original vector")
+    return(vec)
+  }
+  vec_mean <- mean(vec, na.rm = TRUE)
+  vec_sd <- sd(vec, na.rm = TRUE)
+  if (is.na(vec_sd) || vec_sd == 0) {
+    warning("Standard deviation is 0 or NA; returning original vector")
+    return(vec)
+  }
+  (vec - vec_mean) / vec_sd
+}
+
+monthly_DS_incidence <- monthly_DS_incide %>%
+  mutate(
+    mal_cases_norm = getNormalized(mal_cases),
+    incidence_adj_presumed_cases_norm = getNormalized(incidence_adj_presumed_cases),
+    incidence_adj_presumed_cases_RR_norm = getNormalized(incidence_adj_presumed_cases_RR),
+    incidence_adj_presumed_cases_RR_TSR_norm = getNormalized(incidence_adj_presumed_cases_RR_TSR)
+  )
+```
+
+### 6.2 Décomposition STL
+
+**Explication** : Les séries normalisées sont décomposées, et les tests Mann-Kendall évaluent la significativité des tendances.
+
+```{r stl_mann_kendall}
+STL_result_DF_norm_list <- list()
+indicators <- list(
+  list(col = "mal_cases_norm", type = "Crude Incidence"),
+  list(col = "incidence_adj_presumed_cases_norm", type = "Adjusted Presumed Cases"),
+  list(col = "incidence_adj_presumed_cases_RR_norm", type = "Adjusted Presumed Cases RR"),
+  list(col = "incidence_adj_presumed_cases_RR_TSR_norm", type = "Adjusted Presumed Cases RR TSR")
+)
+
+for (DS in sort(unique(monthly_DS_incidence$adm2))) {
+  cases_dist <- monthly_DS_incidence %>%
+    filter(adm2 == DS) %>%
+    arrange(Date)
+  
+  if (nrow(cases_dist) == 0) {
+    warning(paste("No data for district:", DS, "- skipping"))
+    next
+  }
+  
+  for (ind in indicators) {
+    if (!ind$col %in% names(cases_dist)) {
+      warning(paste("Column", ind$col, "not found in district", DS, "- skipping"))
+      next
+    }
+    
+    ind_values <- cases_dist[[ind$col]]
+    valid_idx <- !is.na(ind_values)
+    valid_ind_norm <- ind_values[valid_idx]
+    valid_dates <- cases_dist$Date[valid_idx]
+    
+    if (length(valid_ind_norm) < 2) {
+      warning(paste("Fewer than 2 valid observations for", ind$col, "in district", DS, "- skipping"))
+      next
+    }
+    
+    start_year <- as.numeric(format(valid_dates[1], "%Y"))
+    start_month <- as.numeric(format(valid_dates[1], "%m"))
+    ind_ts <- ts(valid_ind_norm, start = c(start_year, start_month), deltat = 1/12)
+    ind_stl <- stlplus(ind_ts, s.window = "periodic")
+    
+    ind_stl_ts <- as.data.frame(ind_stl$data[, 1:4])
+    ind_stl_ts$type <- ind$type
+    ind_stl_ts$dates <- valid_dates
+    ind_stl_ts$MK_p <- smk.test(ind_ts)$p.value
+    ind_stl_ts$sens_slope <- sea.sens.slope(ind_ts)
+    ind_stl_ts$District <- DS
+    
+    STL_result_DF_norm_list[[paste(DS, ind$col, sep = "_")]] <- ind_stl_ts
+  }
+}
+
+STL_result_DF_norm <- data.table::rbindlist(STL_result_DF_norm_list, fill = TRUE)
+STL_result_DF_slopes <- unique(STL_result_DF_norm[, c("type", "MK_p", "sens_slope", "District")])
+
+# Visualisation des tendances
+g2 <- ggplot(data = STL_result_DF_norm, aes(x = dates, y = trend)) +
+  geom_line(aes(group = District), show.legend = FALSE, color = "blue") +
+  facet_wrap(~type, ncol = 3) +
+  scale_x_yearmon("", breaks = sort(unique(STL_result_DF_norm$dates))[c(seq(1, 96, 6), 96)],
+                  labels = as.yearmon(sort(unique(STL_result_DF_norm$dates))[c(seq(1, 96, 6), 96)])) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.border = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black")
+  )
+
+pdf("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/raw_Incidence_brute_Increasing.pdf")
+print(g2)
+dev.off()
+```
+
+## 7. Visualisation des tendances par district (SI Plots)
+
+**Explication** : Des graphiques détaillés montrent les tendances des indicateurs pour des sous-ensembles de districts.
+
+```{r si_plots}
+for (i in seq(1, 70, 4)) {
+  DS_list <- unique(STL_result_DF_norm[order(STL_result_DF_norm$District), "District"])[i:(i+2)]
+  
+  plotting_DF <- STL_result_DF_norm[which(STL_result_DF_norm$District %in% DS_list),]
+  plotting_DF$facet_group <- paste(plotting_DF$District, plotting_DF$Region, sep = ", ")
+  plotting_DF$District <- str_to_title(plotting_DF$District)
+  
+  plot_trend_1 <- ggplot(plotting_DF[which(plotting_DF$type %in% c("Crude Incidence", "Adjusted Presumed Cases", "Adjusted Presumed Cases RR", "Adjusted Presumed Cases RR TSR")),],
+                         aes(x = dates, y = trend)) +
+    geom_line(aes(group = type, linetype = "solid",
+                  color = factor(type, levels = c("Crude Incidence", "Adjusted Presumed Cases", "Adjusted Presumed Cases RR", "Adjusted Presumed Cases RR TSR"))),
+              show.legend = FALSE) +
+    scale_color_manual("", values = c("#913058", "#F6851F", "#00A08A", "#8971B3")) +
+    scale_linetype_identity("") +
+    xlab("") + ylab("") +
+    facet_wrap(~District, ncol = 2, scales = "free_y") +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black", size = 0.5),
+      panel.spacing.x = unit(2, "mm"),
+      strip.background = element_blank(),
+      axis.text = element_text(colour = "black", size = 8),
+      axis.ticks = element_line(colour = "black", size = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    ylim(0, 200)
+  
+  pdf(paste("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/SI_decomp_v3_", i, ".pdf", sep = ""),
+      width = 5.75, height = 2.8)
+  print(plot_trend_1)
+  dev.off()
+}
+```
+
+## 8. Cartographie des pentes de Sen
+
+**Explication** : Les pentes de Sen sont catégorisées et cartographiées pour visualiser les tendances significatives par district.
+
+```{r sens_slope_map}
+nlleshapefile_sf <- st_read("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/Shapefiles/BFA_Districts_Sanitaires_2022.shp")
+
+# Harmoniser les noms des districts
+nlleshapefile_sf$adm2 <- nlleshapefile_sf$Nom_DS
+nlleshapefile_sf$adm2 <- recode(nlleshapefile_sf$adm2,
+  "DS Banfora" = "Banfora", "DS Barsalogho" = "Barsalogho", "DS Baskuy" = "Baskuy",
+  "DS Batié" = "Batie", "DS Bittou" = "Bitou", "DS Bogande" = "Bogande",
+  "DS Bogodogo" = "Bogodogo", "DS Boromo" = "Boromo", "DS Boulmiougou" = "Boulmiougou",
+  "DS Boulsa" = "Boulsa", "DS Boussé" = "Bousse", "DS Boussouma" = "Boussouma",
+  "DS Dafra" = "Dafra", "DS Dande" = "Dande", "DS Dano" = "Dano",
+  "DS Dedougou" = "Dedougou", "DS Diapaga" = "Diapaga", "DS Diébougou" = "Diebougou",
+  "DS Djibo" = "Djibo", "DS Do" = "Do", "DS Dori" = "Dori",
+  "DS Fada" = "Fada", "DS Gaoua" = "Gaoua", "DS Garango" = "Garango",
+  "DS Gayeri" = "Gayeri", "DS Gorom-Gorom" = "Gorom", "DS Gourcy" = "Gourcy",
+  "DS Hounde" = "Hounde", "DS Kampti" = "Kampti", "DS Karangasso-Vigue" = "Karangasso Vigue",
+  "DS Kaya" = "Kaya", "DS Kombissiri" = "Kombissiri", "DS Kongoussi" = "Kongoussi",
+  "DS Koudougou" = "Koudougou", "DS Koupéla" = "Koupela", "DS Lena" = "Lena",
+  "DS Léo" = "Leo", "DS Manga" = "Manga", "DS Mangodara" = "Mangodara",
+  "DS Manni" = "Manni", "DS N'dorola" = "Ndorola", "DS Nanoro" = "Nanoro",
+  "DS Nongr-Massom" = "Nongr-Massom", "DS Nouna" = "Nouna", "DS Orodara" = "Orodara",
+  "DS Ouahigouya" = "Ouahigouya", "DS Ouargaye" = "Ouargaye", "DS Pama" = "Pama",
+  "DS Pô" = "Po", "DS Pouytenga" = "Pouytenga", "DS Réo" = "Reo",
+  "DS Sabou" = "Sabou", "DS Saponé" = "Sapone", "DS Sapouy" = "Sapouy",
+  "DS Sebba" = "Sebba", "DS Séguénéga" = "Seguenega", "DS Sig- noghin" = "Sig-Noghin",
+  "DS Sindou" = "Sindou", "DS Solenzo" = "Solenzo", "DS Tenado" = "Tenado",
+  "DS Tenkodogo" = "Tenkodogo", "DS Thiou" = "Thiou", "DS Titao" = "Titao",
+  "DS Toma" = "Toma", "DS Tougan" = "Tougan", "DS Tougouri" = "Tougouri",
+  "DS Yako" = "Yako", "DS Zabré" = "Zabre", "DS Ziniaré" = "Ziniare",
+  "DS Zorgho" = "Zorgho"
+)
+
+# Préparer les données de pente
+STL_result_DF_slopes <- STL_result_DF_slopes %>%
+  mutate(
+    plotting_sens_slope = ifelse(MK_p > 0.05, NA, sens_slope),
+    slope = case_when(
+      is.na(plotting_sens_slope) ~ "non significatif",
+      plotting_sens_slope < 0 ~ "Diminution",
+      plotting_sens_slope > 0 ~ "augmentation",
+      TRUE ~ "non significatif"
+    ),
+    adm2 = District
+  )
+
+nvlle_HD_slope <- nlleshapefile_sf %>%
+  full_join(STL_result_DF_slopes, by = "adm2") %>%
+  mutate(
+    slope_cat = case_when(
+      MK_p > 0.05 ~ "Not Significant",
+      plotting_sens_slope <= -0.3 ~ "-0.3",
+      plotting_sens_slope <= -0.2 ~ "-0.2",
+      plotting_sens_slope <= -0.1 ~ "-0.1",
+      plotting_sens_slope <= 0.0 ~ "0.0",
+      plotting_sens_slope <= 0.1 ~ "0.1",
+      plotting_sens_slope <= 0.2 ~ "0.2",
+      TRUE ~ ">0.2"
+    ),
+    slope_cat = factor(slope_cat, levels = c("-0.3", "-0.2", "-0.1", "0.0", "0.1", "0.2", ">0.2", "Not Significant"))
+  )
+
+# Palette de couleurs
+slope_colors <- c(
+  "-0.3" = "#313695", "-0.2" = "#4575B4", "-0.1" = "#74ADD1",
+  "0.0" = "#D1E5F0", "0.1" = "#FDDBC7", "0.2" = "#F46D43",
+  ">0.2" = "#A50026", "Not Significant" = "grey70"
+)
+
+# Carte des pentes de Sen
+p5 <- ggplot(nvlle_HD_slope) +
+  geom_sf(aes(fill = slope_cat), color = "white", size = 0.2) +
+  scale_fill_manual(name = "Sen's Slope\n(Gray = Not Significant)", values = slope_colors, drop = FALSE) +
+  facet_wrap(~type, ncol = 2) +
+  theme_void() +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+pdf("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/sens_slope.pdf", width = 5.75, height = 2.8)
+print(p5)
+dev.off()
+```
+
+## 9. Cartographie des incidences par année
+
+**Explication** : Les incidences sont catégorisées et cartographiées par année pour chaque indicateur.
+
+```{r incidence_maps}
+nvlle_HD <- nlleshapefile_sf %>%
+  full_join(yearly_DS_incide_ov5, by = "adm2") %>%
+  mutate(
+    incidence_cat = cut(mal_cases, breaks = c(0, 250, 350, 450, 1000, 2000),
+                        labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+                        include.lowest = TRUE),
+    incidence_adj1_cat = cut(incidence_adj_presumed_cases, breaks = c(0, 250, 350, 450, 1000, 2000),
+                             labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+                             include.lowest = TRUE),
+    incidence_adj2_cat = cut(incidence_adj_presumed_cases_RR, breaks = c(0, 250, 350, 450, 1000, 2000),
+                             labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+                             include.lowest = TRUE),
+    incidence_adj3_cat = cut(incidence_adj_presumed_cases_RR_TSR, breaks = c(0, 250, 350, 450, 1000, 2000),
+                             labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+                             include.lowest = TRUE)
+  )
+
+colors_inc <- c("#2166AC", "#4393C3", "#FDDBC7", "#FFFF33", "#B2182B")
+
+p9 <- tm_shape(nvlle_HD) +
+  tm_polygons("incidence_cat", title = "Incidence brute (pour 1000)", style = "fixed",
+              breaks = c(0, 250, 350, 450, 1000, 2000), labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+              palette = colors_inc) +
+  tm_facets("year", ncol = 2) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 0.6, legend.text.size = 0.6, frame = FALSE,
+            main.title = "Incidence brute par année")
+
+p8 <- tm_shape(nvlle_HD) +
+  tm_polygons("incidence_adj1_cat", title = "Incidence ajustée 1 (pour 1000)", style = "fixed",
+              breaks = c(0, 250, 350, 450, 1000, 2000), labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+              palette = colors_inc) +
+  tm_facets("year", ncol = 2) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 0.6, legend.text.size = 0.6, frame = FALSE,
+            main.title = "Incidence ajustée 1 par année")
+
+p7 <- tm_shape(nvlle_HD) +
+  tm_polygons("incidence_adj2_cat", title = "Incidence ajustée 2 (pour 1000)", style = "fixed",
+              breaks = c(0, 250, 350, 450, 1000, 2000), labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+              palette = colors_inc) +
+  tm_facets("year", ncol = 2) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 0.6, legend.text.size = 0.6, frame = FALSE,
+            main.title = "Incidence ajustée 2 par année")
+
+p6 <- tm_shape(nvlle_HD) +
+  tm_polygons("incidence_adj3_cat", title = "Incidence ajustée 3 (pour 1000)", style = "fixed",
+              breaks = c(0, 250, 350, 450, 1000, 2000), labels = c("0–250", "250–350", "350–450", "450–1000", "1000–2000"),
+              palette = colors_inc) +
+  tm_facets("year", ncol = 2) +
+  tm_layout(legend.outside = TRUE, legend.title.size = 0.6, legend.text.size = 0.6, frame = FALSE,
+            main.title = "Incidence ajustée 3 par année")
+
+pdf("C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/incidence_maps.pdf", width = 10, height = 8)
+print(p9)
+print(p8)
+print(p7)
+print(p6)
+dev.off()
+```
+
+## 10. Cartographie des variations de taux
+
+**Explication** : Les variations relatives des taux d’incidence sont cartographiées pour chaque indicateur.
+
+```{r rate_variation_maps}
+HD <- nlleshapefile_sf %>%
+  full_join(Augment_dimuni, by = "adm2")
+
+create_rate_map <- function(data, rate_col, file_name, breaks, title) {
+  tm <- tm_shape(data) +
+    tm_polygons(
+      col = rate_col,
+      title = title,
+      breaks = breaks,
+      palette = "-RdYlBu",
+      legend.show = TRUE
+    ) +
+    tm_layout(
+      main.title = title,
+      main.title.size = 1,
+      main.title.position = "center",
+      legend.outside = TRUE,
+      legend.title.size = 0.6,
+      legend.text.size = 0.6,
+      frame = FALSE
+    )
+  
+  pdf(file_name, width = 8, height = 6)
+  print(tm)
+  dev.off()
+}
+
+rate_configs <- list(
+  list(col = "rate", file = "C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/N_rate_crude.pdf", breaks = c(-100, 0, 50, 100, 250), title = "Taux brut de variation"),
+  list(col = "rateN1", file = "C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/N1_rate.pdf", breaks = c(-100, 0, 50, 100, 250), title = "Taux de variation ajusté 1"),
+  list(col = "rateN2", file = "C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/N2_rate.pdf", breaks = c(-100, 0, 50, 100, 250), title = "Taux de variation ajusté 2"),
+  list(col = "rateN3", file = "C:/Users/ood5226.FSM/NU-malaria-team Dropbox/projects/hbhi_burkina/project_notes/publication/retrospective analysis 2023/plots_2024/N3_rate.pdf", breaks = c(-100, 0, 50, 100, 250), title = "Taux de variation ajusté 3")
+)
+
+lapply(rate_configs, function(config) {
+  create_rate_map(
+    data = HD,
+    rate_col = config$col,
+    file_name = config$file,
+    breaks = config$breaks,
+    title = config$title
+  )
+})
+```
