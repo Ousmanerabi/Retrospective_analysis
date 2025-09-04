@@ -453,3 +453,7 @@ monthly_data_DS <- raw_data_all %>%
 
 # 16) Save data
 
+# ============================
+write_csv(district_reporting_rates, "outputs/district_reporting_rates.csv")
+write_csv(out_conf_imputed, "outputs/hf_conf_with_outlier_imputation.csv")
+write_csv(monthly_DS, "outputs/monthly_DS_aggregates.csv")
