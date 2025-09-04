@@ -6,7 +6,7 @@
 
 ---
 
-## 📌 Overview  
+## Overview  
 This project analyzes **routine malaria surveillance data** from Burkina Faso (2016–2023) to:  
 - Assess malaria incidence trends at the **health district level**  
 - Adjust incidence using WHO’s framework (testing, reporting, care-seeking)  
@@ -16,13 +16,13 @@ The analysis combines **routine HMIS data**, **DHS/MIS surveys**, **PNLP interve
 
 ---
 
-## 📊 Data Sources  
+##  Data Sources  
 - **HMIS (Health Management Information System):** malaria cases, 2016–2023  
 - **PNLP (Programme National de Lutte contre le Paludisme):** ITN, SMC, stockouts  
 - **DHS/MIS:** ITN ownership, treatment-seeking, IPTp coverage  
 - **CHIRPS:** Rainfall estimates  
 
-⚠️ **Note**: Routine & intervention data are **not public**. DHS/MIS & CHIRPS climate data are publicly available.  
+**Note**: Routine & intervention data are **not public**. DHS/MIS & CHIRPS climate data are publicly available.  
 
 ---
 
