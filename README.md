@@ -56,12 +56,3 @@ The analysis combines **routine HMIS data**, **DHS/MIS surveys**, **PNLP interve
 
 ---
 
-## Repository Structure  
-```plaintext
-Retrospective_analysis/
-├── data/                 # Placeholder for raw data (not shared)
-├── scripts/              # R scripts (cleaning, analysis, figures)
-├── figures/              # Generated maps & plots
-├── outputs/              # Results, tables, exports
-├── retrospective_analysis.qmd   # Quarto project page
-└── README.md             # Project description
