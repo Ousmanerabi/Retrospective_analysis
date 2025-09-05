@@ -32,7 +32,7 @@ The analysis combines **routine HMIS data**, **DHS/MIS surveys**, **PNLP interve
 - Standardized district & health facility names  
 - Removed duplicates / inconsistencies  
 - Classified facility reporting status (active vs inactive)  
-- Detected & imputed outliers (3×SD, MAD, IQR methods)  
+- Detected & imputed outliers (3mean×SD, MAD, IQR methods)  
 
 ### Incidence Adjustments  
 - **Crude incidence** = confirmed cases ÷ population × 1000  
