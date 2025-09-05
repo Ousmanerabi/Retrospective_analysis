@@ -1,7 +1,6 @@
 # ============================================================
 # Burkina Faso malaria – data prep, reporting, outliers (clean)
 # Author: Ousmane Diallo
-# Requires: R >= 4.1, tidyverse
 # ============================================================
 
 # -------------------------
